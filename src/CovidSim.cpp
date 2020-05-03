@@ -3,9 +3,6 @@
 	All rights reserved. Copying and distribution prohibited without prior permission.
 */
 
-#include <errno.h>
-#include <stddef.h>
-
 #include "CovidSim.h"
 #include "binio.h"
 #include "Rand.h"
@@ -21,9 +18,16 @@
 #include "InfStat.h"
 #include "CalcInfSusc.h"
 #include "Update.h"
+#include "Perf.h"
+
 #ifdef _OPENMP
 #include <omp.h>
 #endif // _OPENMP
+
+#include <thread>
+
+#include <cerrno>
+#include <cstddef>
 
 #ifndef max
 #define max(a,b) ((a) > (b) ? (a) : (b))
@@ -115,6 +119,9 @@ int PlaceDistDistrib[NUM_PLACE_TYPES][MAX_DIST], PlaceSizeDistrib[NUM_PLACE_TYPE
 
 int main(int argc, char* argv[])
 {
+    PERF_INIT(&argc, &argv);
+    PERF_FUNCTION("");
+
 	char ParamFile[1024]{}, DensityFile[1024]{}, NetworkFile[1024]{}, AirTravelFile[1024]{}, SchoolFile[1024]{}, RegDemogFile[1024]{}, InterventionFile[MAXINTFILE][1024]{}, PreParamFile[1024]{}, buf[2048]{}, * sep;
 	int i, GotP, GotPP, GotO, GotL, GotS, GotA, GotAP, GotScF, Perr, cl;
 
@@ -280,9 +287,9 @@ int main(int argc, char* argv[])
 			}
 		}
 		if (((GotS) && (GotL)) || (!GotP) || (!GotO)) Perr = 1;
-	}
+    }
 
-	///// END Read in command line arguments
+    ///// END Read in command line arguments
 
 	sprintf(OutFile, "%s", OutFileBase);
 
@@ -294,7 +301,7 @@ int main(int argc, char* argv[])
 	//// **** //// **** //// **** //// **** //// **** //// **** //// **** //// **** //// **** //// **** //// **** //// **** //// **** //// ****
 
 #ifdef _OPENMP
-	P.NumThreads = omp_get_max_threads();
+	P.NumThreads = std::thread::hardware_concurrency();
 	if ((P.MaxNumThreads > 0) && (P.MaxNumThreads < P.NumThreads)) P.NumThreads = P.MaxNumThreads;
 	if (P.NumThreads > MAX_NUM_THREADS)
 	{
@@ -321,8 +328,7 @@ int main(int argc, char* argv[])
 	//// **** READ IN PARAMETERS, DATA ETC.
 	//// **** //// **** //// **** //// **** //// **** //// **** //// **** //// **** //// **** //// **** //// **** //// **** //// **** //// ****
 
-
-	ReadParams(ParamFile, PreParamFile);
+    ReadParams(ParamFile, PreParamFile);
 	if (GotScF) P.DoSchoolFile = 1;
 	if (P.DoAirports)
 	{
@@ -367,6 +373,7 @@ int main(int argc, char* argv[])
 			P.nextRunSeed2 = P.runSeed2;
 		}
 		if (P.ResetSeeds) {
+            PERF_RECORD("SaveRandomSeeds");
 			//save these seeds to file
 			SaveRandomSeeds();
 		}
@@ -394,11 +401,13 @@ int main(int argc, char* argv[])
 		{
 			if (((!TimeSeries[P.NumSamples - 1].extinct) || (!P.OutputOnlyNonExtinct)) && (P.OutputEveryRealisation))
 			{
+                PERF_RECORD("SaveEvents");
 				SaveResults();
 			}
 		}
 		if ((P.DoRecordInfEvents) && (P.RecordInfEventsPerRun == 1))
 		{
+            PERF_RECORD("SaveEvents");
 			SaveEvents();
 		}
 	}
@@ -424,6 +433,7 @@ int main(int argc, char* argv[])
 	sprintf(OutFile, "%s.avE", OutFileBase);
 	//SaveSummaryResults();
 
+    PERF_FINALIZE();
 
 #ifdef WIN32_BM
 	Gdiplus::GdiplusShutdown(m_gdiplusToken);
@@ -433,10 +443,11 @@ int main(int argc, char* argv[])
 	fprintf(stderr, "Model finished\n");
 }
 
-
 void ReadParams(char* ParamFile, char* PreParamFile)
 {
-	FILE* ParamFile_dat, * PreParamFile_dat, *AdminFile_dat;
+    PERF_FUNCTION("[", ParamFile, "][", PreParamFile, "]");
+
+    FILE* ParamFile_dat, * PreParamFile_dat, *AdminFile_dat;
 	double s, t, AgeSuscScale;
 	int i, j, k, f, nc, na;
 	char CountryNameBuf[128 * MAX_COUNTRIES], AdunitListNamesBuf[128 * MAX_ADUNITS];
@@ -1512,7 +1523,7 @@ void ReadParams(char* ParamFile, char* PreParamFile)
 		if (!GetInputParameter2(ParamFile_dat, PreParamFile_dat, "Proportion of places remaining open after closure by place type", "%lf", (void*)P.PlaceCloseEffect, P.PlaceTypeNum, 1, 0))
 			for (i = 0; i < NUM_PLACE_TYPES; i++) P.PlaceCloseEffect[i] = 1;
 		if (!GetInputParameter2(ParamFile_dat, PreParamFile_dat, "Proportional attendance after closure by place type", "%lf", (void*)P.PlaceClosePropAttending, P.PlaceTypeNum, 1, 0))
-			for (i = 0; i < NUM_PLACE_TYPES; i++) P.PlaceClosePropAttending[i] = 0;		
+			for (i = 0; i < NUM_PLACE_TYPES; i++) P.PlaceClosePropAttending[i] = 0;
 	}
 	if (P.DoHouseholds)
 		if (!GetInputParameter2(ParamFile_dat, PreParamFile_dat, "Relative household contact rate after closure", "%lf", (void*)& P.PlaceCloseHouseholdRelContact, 1, 1, 0)) P.PlaceCloseHouseholdRelContact = 1;
@@ -2021,23 +2032,26 @@ void ReadParams(char* ParamFile, char* PreParamFile)
 	P.usCaseIsolationDuration = ((unsigned short int) (P.CaseIsolationDuration * P.TimeStepsPerDay));
 	P.usCaseAbsenteeismDuration = ((unsigned short int) (P.CaseAbsenteeismDuration * P.TimeStepsPerDay));
 	P.usCaseAbsenteeismDelay = ((unsigned short int) (P.CaseAbsenteeismDelay * P.TimeStepsPerDay));
-	if (P.DoUTM_coords)
-	{
-		for (i = 0; i <= 1000; i++)
-		{
-			asin2sqx[i] = asin(sqrt(((double)(i)) / 1000));
-			asin2sqx[i] = asin2sqx[i] * asin2sqx[i];
-		}
-		for (t = 0; t <= 360; t++)
-		{
-			sinx[(int)t] = sin(PI * t / 180);
-			cosx[(int)t] = cos(PI * t / 180);
-		}
-	}
-	fprintf(stderr, "Parameters read\n");
+    if(P.DoUTM_coords)
+    {
+        for(i = 0; i <= 1000; i++)
+        {
+            asin2sqx[i] = asin(sqrt(((double) (i)) / 1000));
+            asin2sqx[i] = asin2sqx[i] * asin2sqx[i];
+        }
+        for(t = 0; t <= 360; t++)
+        {
+            sinx[(int) t] = sin(PI * t / 180);
+            cosx[(int) t] = cos(PI * t / 180);
+        }
+    }
+    fprintf(stderr, "Parameters read\n");
 }
+
 void ReadInterventions(char* IntFile)
 {
+    PERF_FUNCTION("[", IntFile, "]");
+
 	FILE* dat;
 	double r, s, startt, stopt;
 	int j, k, au, ni, f, nsr;
@@ -2243,9 +2257,12 @@ void ReadInterventions(char* IntFile)
 	fprintf(stderr, "%i interventions read\n", ni);
 	fclose(dat);
 }
+
 int GetXMLNode(FILE* dat, const char* NodeName, const char* ParentName, char* Value, int ResetFilePos)
 {
-	// ResetFilePos=1 leaves dat cursor in same position as when function was called. 0 leaves it at end of NodeName closure
+    PERF_FUNCTION("");
+
+    // ResetFilePos=1 leaves dat cursor in same position as when function was called. 0 leaves it at end of NodeName closure
 	// GetXMLNode returns 1 if NodeName found, 0 otherwise. If NodeName not found, ParentName closure must be
 
 	char buf[65536], CloseNode[2048], CloseParent[2048];
@@ -2279,9 +2296,12 @@ int GetXMLNode(FILE* dat, const char* NodeName, const char* ParentName, char* Va
 	if (ResetFilePos) fseek(dat, CurPos, 0);
 	return ret;
 }
+
 void ReadAirTravel(char* AirTravelFile)
 {
-	int i, j, k, l;
+    PERF_FUNCTION("[", AirTravelFile, "]");
+
+    int i, j, k, l;
 	float sc, t, t2;
 	float* buf;
 	double traf;
@@ -2429,7 +2449,9 @@ void ReadAirTravel(char* AirTravelFile)
 
 void InitModel(int run) // passing run number so we can save run number in the infection event log: ggilani - 15/10/2014
 {
-	int i, j, k, l, m, tn, nim;
+    PERF_FUNCTION("/", run);
+
+    int i, j, k, l, m, tn, nim;
 	int nsi[MAX_NUM_SEED_LOCATIONS];
 
 	if (P.OutputBitmap)
@@ -2780,7 +2802,9 @@ void InitModel(int run) // passing run number so we can save run number in the i
 
 void SeedInfection(double t, int* nsi, int rf, int run) //adding run number to pass it to event log
 {
-	/* *nsi is an array of the number of seeding infections by location (I think). During runtime, usually just a single int (given by a poisson distribution)*/
+    PERF_FUNCTION("/run=", run);
+
+    /* *nsi is an array of the number of seeding infections by location (I think). During runtime, usually just a single int (given by a poisson distribution)*/
 	/*rf set to 0 when initializing model, otherwise set to 1 during runtime. */
 
 	int i /*seed location index*/;
@@ -2900,10 +2924,11 @@ void SeedInfection(double t, int* nsi, int rf, int run) //adding run number to p
 	if (m > 0) fprintf(stderr, "### Seeding error ###\n");
 }
 
-
 int RunModel(int run) //added run number as parameter
 {
-	int j, k, l, fs, fs2, nu, ni,nsi[MAX_NUM_SEED_LOCATIONS] /*Denotes either Num imported Infections given rate ir, or number false positive "infections"*/;
+    PERF_FUNCTION("/", run);
+
+    int j, k, l, fs, fs2, nu, ni,nsi[MAX_NUM_SEED_LOCATIONS] /*Denotes either Num imported Infections given rate ir, or number false positive "infections"*/;
 	double ir; // infection import rate?;
 	double t, cI, lcI, t2;
 	unsigned short int ts;
@@ -3062,8 +3087,10 @@ int RunModel(int run) //added run number as parameter
 
 void SaveDistribs(void)
 {
-	int i, j, k;
-	FILE* dat;
+    PERF_FUNCTION("");
+
+    int    i, j, k;
+    FILE* dat;
 	char outname[1024];
 	double s;
 
@@ -3142,17 +3169,19 @@ void SaveDistribs(void)
 		fclose(dat);
 	}
 }
+
 void SaveOriginDestMatrix(void)
 {
-	/** function: SaveOriginDestMatrix
-	 *
-	 * purpose: to save the calculated origin destination matrix to file
-	 * parameters: none
-	 * returns: none
-	 *
-	 * author: ggilani, 13/02/15
-	 */
-	int i, j;
+    PERF_FUNCTION("");
+    /** function: SaveOriginDestMatrix
+     *
+     * purpose: to save the calculated origin destination matrix to file
+     * parameters: none
+     * returns: none
+     *
+     * author: ggilani, 13/02/15
+     */
+    int i, j;
 	FILE* dat;
 	char outname[1024];
 
@@ -3175,7 +3204,9 @@ void SaveOriginDestMatrix(void)
 
 void SaveResults(void)
 {
-	int i, j;
+    PERF_FUNCTION("");
+
+    int i, j;
 	FILE* dat;
 	char outname[1024];
 
@@ -3456,7 +3487,9 @@ void SaveResults(void)
 
 void SaveSummaryResults(void) //// calculates and saves summary results (called for average of extinct and non-extinct realisation time series - look in main)
 {
-	int i, j;
+    PERF_FUNCTION("");
+
+    int i, j;
 	double c, t;
 	FILE* dat;
 	char outname[1024];
@@ -3934,7 +3967,9 @@ void SaveSummaryResults(void) //// calculates and saves summary results (called 
 
 void SaveRandomSeeds(void)
 {
-	/* function: SaveRandomSeeds(void)
+    PERF_FUNCTION("");
+
+    /* function: SaveRandomSeeds(void)
 	 *
 	 * Purpose: outputs the random seeds used for each run to a file
 	 * Parameter: none
@@ -3953,7 +3988,9 @@ void SaveRandomSeeds(void)
 
 void SaveEvents(void)
 {
-	/* function: SaveEvents(void)
+    PERF_FUNCTION("");
+
+    /* function: SaveEvents(void)
 	 *
 	 * Purpose: outputs event log to a csv file if required
 	 * Parameters: none
@@ -3978,7 +4015,9 @@ void SaveEvents(void)
 
 void LoadSnapshot(void)
 {
-	FILE* dat;
+    PERF_FUNCTION("");
+
+    FILE* dat;
 	int i, j, * CellMemberArray, * CellSuscMemberArray;
 	long l;
 	long long CM_offset, CSM_offset;
@@ -4063,7 +4102,9 @@ void LoadSnapshot(void)
 
 void SaveSnapshot(void)
 {
-	FILE* dat;
+    PERF_FUNCTION("");
+
+    FILE* dat;
 	int i = 1;
 
 	if (!(dat = fopen(SnapshotSaveFile, "wb"))) ERR_CRITICAL("Unable to open snapshot file\n");
@@ -4113,7 +4154,9 @@ void SaveSnapshot(void)
 
 void UpdateProbs(int DoPlace)
 {
-	int j;
+    PERF_FUNCTION("/", DoPlace);
+
+    int j;
 
 	if (!DoPlace)
 	{
@@ -4162,10 +4205,9 @@ void UpdateProbs(int DoPlace)
 	}
 }
 
-
 int ChooseTriggerVariableAndValue(int AdUnit)
 {
-	int VariableAndValue = 0;
+    int VariableAndValue = 0;
 	if (P.DoGlobalTriggers)
 	{
 		if (P.DoPerCapitaTriggers)
@@ -4178,6 +4220,7 @@ int ChooseTriggerVariableAndValue(int AdUnit)
 
 	return VariableAndValue;
 }
+
 double ChooseThreshold(int AdUnit, double WhichThreshold) //// point is that this threshold needs to be generalised, so this is likely insufficient.
 {
 	double Threshold = 0;
@@ -4191,6 +4234,7 @@ double ChooseThreshold(int AdUnit, double WhichThreshold) //// point is that thi
 	}
 	return Threshold;
 }
+
 void DoOrDontAmendStartTime (double *StartTimeToAmend, double StartTime)
 {
 	if (*StartTimeToAmend >= 1e10) *StartTimeToAmend = StartTime;
@@ -4198,7 +4242,9 @@ void DoOrDontAmendStartTime (double *StartTimeToAmend, double StartTime)
 
 void UpdateEfficaciesAndComplianceProportions(double t)
 {
-	//// **** social distancing
+    PERF_FUNCTION("/", t);
+
+    //// **** social distancing
 	for (int ChangeTime = 0; ChangeTime < P.Num_SD_ChangeTimes; ChangeTime++)
 		if (t == P.SD_ChangeTimes[ChangeTime])
 		{
@@ -4265,7 +4311,7 @@ void UpdateEfficaciesAndComplianceProportions(double t)
 					P.PlaceCloseEffect[PlaceType] = P.PC_PlaceEffects_OverTime[ChangeTime][PlaceType];	//// place
 					P.PlaceClosePropAttending[PlaceType] = P.PC_PropAttending_OverTime[ChangeTime][PlaceType];	//// place
 				}
-				
+
 				P.PlaceCloseIncTrig				= P.PC_IncThresh_OverTime		[ChangeTime];				//// global incidence threshold
 				P.PlaceCloseFracIncTrig			= P.PC_FracIncThresh_OverTime	[ChangeTime];				//// fractional incidence threshold
 				P.PlaceCloseCellIncThresh		= P.PC_CellIncThresh_OverTime	[ChangeTime];				//// cell incidence threshold
@@ -4275,10 +4321,10 @@ void UpdateEfficaciesAndComplianceProportions(double t)
 				//// reset place close time start - has been set to 9e9 in event of no triggers. m
 				P.PlaceCloseTimeStart			= t;
 
-				// ensure that new duration doesn't go over next change time. Judgement call here - talk to Neil if this is what he wants. 
+				// ensure that new duration doesn't go over next change time. Judgement call here - talk to Neil if this is what he wants.
 				if (ChangeTime != P.Num_PC_ChangeTimes - 1)
 					if (P.PlaceCloseTimeStart + P.PlaceCloseDuration >= P.PC_ChangeTimes[ChangeTime + 1])
-						P.PlaceCloseDuration = P.PC_ChangeTimes[ChangeTime + 1] - P.PC_ChangeTimes[ChangeTime] + 1;	
+						P.PlaceCloseDuration = P.PC_ChangeTimes[ChangeTime + 1] - P.PC_ChangeTimes[ChangeTime] + 1;
 			}
 	}
 
@@ -4295,7 +4341,9 @@ void UpdateEfficaciesAndComplianceProportions(double t)
 
 void RecordSample(double t, int n)
 {
-	int i, j, k, S, L, I, R, D, N, cumC, cumTC, cumI, cumR, cumD, cumDC, cumFC;
+    PERF_FUNCTION("");
+
+    int i, j, k, S, L, I, R, D, N, cumC, cumTC, cumI, cumR, cumD, cumDC, cumFC;
 	int cumH; //add number of hospitalised, cumulative hospitalisation: ggilani 28/10/14
 	int cumCT; //added cumulative number of contact traced: ggilani 15/06/17
 	int cumCC; //added cumulative number of cases who are contacts: ggilani 28/05/2019
@@ -4878,7 +4926,7 @@ void RecordSample(double t, int n)
 		}
 	}
 
-	
+
 
 	if (P.OutputBitmap >= 1)
 	{
@@ -4890,7 +4938,9 @@ void RecordSample(double t, int n)
 
 void RecordInfTypes(void)
 {
-	int i, j, k, l, lc, lc2, b, c, n, nf, i2;
+    PERF_FUNCTION("");
+
+    int i, j, k, l, lc, lc2, b, c, n, nf, i2;
 	double* res, * res_av, * res_var, t, s;
 
 	for (n = 0; n < P.NumSamples; n++)
@@ -5040,10 +5090,11 @@ void RecordInfTypes(void)
 	PeakTimeSS += t * t;
 }
 
-
 void CalcOriginDestMatrix_adunit()
 {
-	/** function: CalcOriginDestMatrix_adunit()
+    PERF_FUNCTION("");
+
+    /** function: CalcOriginDestMatrix_adunit()
 	 *
 	 * purpose: to output the origin destination matrix between admin units
 	 *
@@ -5205,6 +5256,7 @@ int GetInputParameter (FILE* dat, FILE* dat2, const char* SItemName, const char*
 	}
 	return FindFlag;
 }
+
 int GetInputParameter2(FILE* dat, FILE* dat2, const char* SItemName, const char* ItemType, void* ItemPtr, int NumItem, int NumItem2, int Offset)
 {
 	int FindFlag = 0;
